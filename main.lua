@@ -141,7 +141,7 @@ local function GetClosestShipToPlayer()
             local okName, name = pcall(function() return pawn:GetFullName() end)
             if okName and name then
                 local lowerName = string.lower(name)
-                local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character") and not string.find(lowerName, "shallowboat")
+                local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character")
                 if isShip then
                     local sLoc = GetActorLoc(pawn)
                     if sLoc then
@@ -206,8 +206,12 @@ local function SaveDockData(data)
     file:write("return {\n")
     for playerName, ships in pairs(data) do
         file:write(string.format('  ["%s"] = {\n', playerName))
-        for shipClass, coords in pairs(ships) do
-            file:write(string.format('    ["%s"] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', shipClass, coords.X, coords.Y, coords.Z, coords.Yaw))
+        for shipClass, spots in pairs(ships) do
+            file:write(string.format('    ["%s"] = {\n', shipClass))
+            for i, coords in ipairs(spots) do
+                file:write(string.format('      [%d] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', i, coords.X, coords.Y, coords.Z, coords.Yaw))
+            end
+            file:write("    },\n")
         end
         file:write("  },\n")
     end
@@ -244,7 +248,33 @@ RegisterConsoleCommandHandler("setdock", function(FullCommand, Parameters, Ar)
         
         local data = LoadDockData()
         if not data[playerName] then data[playerName] = {} end
-        data[playerName][shipClass] = { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw }
+        
+        -- Auto-migrate old format if necessary
+        if type(data[playerName][shipClass]) ~= "table" or data[playerName][shipClass].X then
+            data[playerName][shipClass] = {} 
+        end
+        
+        local spots = data[playerName][shipClass]
+        local foundIdx = nil
+        
+        -- Check if we are adjusting an existing dock (within 1000 units / 10 meters)
+        for i, coords in ipairs(spots) do
+            local dx = loc.X - coords.X
+            local dy = loc.Y - coords.Y
+            local dz = loc.Z - coords.Z
+            if math.sqrt(dx*dx + dy*dy + dz*dz) < 1000 then
+                foundIdx = i
+                break
+            end
+        end
+        
+        if foundIdx then
+            spots[foundIdx] = { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw }
+            Log(string.format("Adjusted existing dock [%d] for %s.", foundIdx, shipClass))
+        else
+            table.insert(spots, { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw })
+            Log(string.format("Created new dock [%d] for %s.", #spots, shipClass))
+        end
         
         SaveDockData(data)
     else
@@ -283,25 +313,32 @@ RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
     if not ok or not pawns then return true end
 
     local dockedCount = 0
+    local spotIndexTracker = {}
     for _, pawn in ipairs(pawns) do
         if pawn and pawn:IsValid() then
             local okName, name = pcall(function() return pawn:GetFullName() end)
             if okName and name then
                 local lowerName = string.lower(name)
-                local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character") and not string.find(lowerName, "shallowboat")
+                local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character")
                 if isShip then
                     local shipClass = string.match(name, "^([^%s]+)") or name
-                    local savedCoords = data[playerName][shipClass]
+                    local spots = data[playerName][shipClass]
                     
-                    if savedCoords then
-                        local targetLoc = { X = savedCoords.X, Y = savedCoords.Y, Z = savedCoords.Z }
-                        local targetRot = { Pitch = 0, Yaw = savedCoords.Yaw, Roll = 0 }
+                    if spots and type(spots) == "table" and not spots.X then
+                        local currentIdx = spotIndexTracker[shipClass] or 1
+                        local savedCoords = spots[currentIdx]
                         
-                        pcall(function() pawn:K2_SetActorLocation(targetLoc, false, {}, true) end)
-                        pcall(function() pawn:K2_SetActorRotation(targetRot, true) end)
-                        
-                        Log(string.format("Success! %s docked.", shipClass))
-                        dockedCount = dockedCount + 1
+                        if savedCoords then
+                            local targetLoc = { X = savedCoords.X, Y = savedCoords.Y, Z = savedCoords.Z }
+                            local targetRot = { Pitch = 0, Yaw = savedCoords.Yaw, Roll = 0 }
+                            
+                            pcall(function() pawn:K2_SetActorLocation(targetLoc, false, {}, true) end)
+                            pcall(function() pawn:K2_SetActorRotation(targetRot, true) end)
+                            
+                            Log(string.format("Success! %s docked at spot [%d].", shipClass, currentIdx))
+                            dockedCount = dockedCount + 1
+                            spotIndexTracker[shipClass] = currentIdx + 1
+                        end
                     end
                 end
             end
