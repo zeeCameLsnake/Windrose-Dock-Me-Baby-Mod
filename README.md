@@ -5,8 +5,10 @@ A Lua mod for the game **Windrose** (powered by UE4SS) that acts as a "Valet Par
 Currently, ships often spawn at inconsistent or random points off the coast when teleporting home. This mod allows you to park your ship perfectly at your custom dock, save that exact position, and later recall the ship to that exact spot on demand.
 
 ## Features
-* **Custom Docking Location:** Save the exact X, Y, Z coordinates and Yaw rotation of your ship.
-* **Persistent Saves:** Your custom dock location is saved in a `.json` file and persists across game restarts.
+* **Custom Docking Location:** Save the exact X, Y, Z coordinates and Yaw rotation of your ships.
+* **Multi-Ship Support:** The mod stores the coordinates per player and per ship class, meaning you can have custom docks for your Frigate, Brig, etc. all at once!
+* **Persistent Saves:** Your custom dock locations are safely saved in a `.lua` dictionary file and persist across game restarts.
+* **Anti-Cheat & Immersion:** To prevent players from using the valet parking to escape naval combat, you must be within 250 meters of a player-built Camp (BuildingCenter) to use the recall command.
 * **Safe Teleportation:** The mod safely teleports the player along with the ship if they are on board during the recall.
 
 ## Installation
@@ -25,11 +27,9 @@ Currently, ships often spawn at inconsistent or random points off the coast when
 Open the in-game developer console (usually **F10**) and use the following commands:
 
 * `setdock` 
-  Identifies your active ship and saves its current position and rotation to `DockMeBaby_Coords.json`.
+  Identifies the ship closest to you and saves its current position and rotation to `DockMeBaby_SaveData.lua` under your player name.
 * `dock` 
-  Reads the saved coordinates and instantly teleports your ship back to its custom dock.
-* `scanship` 
-  (Debug) Scans the world and lists all potential ship classes in the UE4SS console.
+  Reads your saved coordinates and instantly teleports all your saved ships back to their custom docks. Requires you to be within 25,000 units (approx. 250m) of a Camp/BuildingCenter.
 
 ## Note on Usage
-This version currently saves a single ship configuration. Ensure you are on or very close to your ship when using `setdock` so the mod can accurately identify the correct vessel.
+Ensure you are very close to the ship you want to save when using `setdock` so the mod can accurately identify the correct vessel. When using `dock`, you must be close to your base.

@@ -4,35 +4,135 @@ local function Log(msg)
     print("[DockMeBaby] " .. tostring(msg) .. "\n")
 end
 
--- Scans for potential ship instances in the world
-local function ScanForShips()
-    Log("Starting ship scan...")
-    
-    local ok, pawns = pcall(function() return FindAllOf("Pawn") end)
-    if not ok or not pawns then
-        Log("Failed to execute FindAllOf('Pawn').")
-        return
+-- ==========================================
+-- HELPER FUNCTIONS
+-- ==========================================
+local function GetPlayerSafe()
+    local ok1, r1 = pcall(function()
+        local chars = FindAllOf("BP_R5Character_C")
+        if chars then
+            for _, c in ipairs(chars) do
+                if c and c:IsValid() then return c end
+            end
+        end
+        return nil
+    end)
+    if ok1 and r1 then return r1 end
+
+    local ok2, r2 = pcall(function()
+        local pc = FindFirstOf("PlayerController")
+        if pc and pc:IsValid() then
+            local pawn = pc:GetPawn()
+            if pawn and pawn:IsValid() then return pawn end
+        end
+        return nil
+    end)
+    if ok2 and r2 then return r2 end
+
+    local ok3, r3 = pcall(UEHelpers.GetPlayer)
+    if ok3 and r3 and r3:IsValid() then return r3 end
+
+    return nil
+end
+
+local function GetActorLoc(actor)
+    if not actor then return nil end
+    local ok, loc = pcall(function() return actor:K2_GetActorLocation() end)
+    if ok and loc then
+        local okX = pcall(function() return loc.X + 0 end)
+        if okX then return loc end
+    end
+    local ok2, loc2 = pcall(function()
+        local root = actor.RootComponent
+        if root then return root.RelativeLocation end
+        return nil
+    end)
+    if ok2 and loc2 then
+        local okX = pcall(function() return loc2.X + 0 end)
+        if okX then return loc2 end
+    end
+    return nil
+end
+
+local function GetPlayerIdentifier()
+    local okPC, pc = pcall(function() return FindFirstOf("PlayerController") end)
+    if okPC and pc and pc:IsValid() then
+        local okPS, ps = pcall(function() return pc.PlayerState end)
+        if okPS and ps and ps:IsValid() then
+            local okName, pName = pcall(function() return ps:GetPlayerName() end)
+            if okName and pName then
+                local rawName = ""
+                -- Unpack the UE4 FString object into a normal Lua string
+                pcall(function()
+                    if type(pName) == "userdata" and pName.ToString then
+                        rawName = pName:ToString()
+                    else
+                        rawName = tostring(pName)
+                    end
+                end)
+                
+                -- Ensure we don't accidentally save the FString memory pointer
+                if rawName ~= "" and not string.match(rawName, "^FString%s") then
+                    local safeName = string.gsub(rawName, '[^%w%s_]', '')
+                    if safeName ~= "" then
+                        return safeName
+                    end
+                end
+            end
+        end
+    end
+    return "LocalPlayer"
+end
+
+-- Checks if the player is within a specific distance of ANY BuildingCenter (Camp)
+local function IsPlayerNearCamp(maxDistance)
+    local player = GetPlayerSafe()
+    local pLoc = GetActorLoc(player)
+    if not pLoc then 
+        Log("Could not verify player location for camp proximity check.")
+        return false, 999999999 
     end
 
-    local foundCount = 0
-    for _, pawn in ipairs(pawns) do
-        if pawn and pawn:IsValid() then
-            local okName, name = pcall(function() return pawn:GetFullName() end)
-            if okName and name then
-                local lowerName = string.lower(name)
-                if string.find(lowerName, "ship") or string.find(lowerName, "boat") then
-                    Log("Potential Ship Found: " .. name)
-                    foundCount = foundCount + 1
+    local bestDist = 999999999
+    local ok, actors = pcall(function() return FindAllOf("Actor") end)
+    if ok and actors then
+        for _, actor in ipairs(actors) do
+            if actor and actor:IsValid() then
+                local okName, name = pcall(function() return actor:GetFullName() end)
+                if okName and name then
+                    local lowerName = string.lower(name)
+                    if string.find(lowerName, "buildingcenter") then
+                        local aLoc = GetActorLoc(actor)
+                        if aLoc then
+                            local dx = pLoc.X - aLoc.X
+                            local dy = pLoc.Y - aLoc.Y
+                            local dz = pLoc.Z - aLoc.Z
+                            local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                            if dist < bestDist then
+                                bestDist = dist
+                            end
+                        end
+                    end
                 end
             end
         end
     end
     
-    Log("Scan complete. Found " .. tostring(foundCount) .. " potential ship actors.")
+    return (bestDist <= maxDistance), bestDist
 end
 
--- Finds the first valid, active ship Pawn in the world
-local function FindActiveShip(preferredClass)
+-- Finds the ship physically closest to the player (so we save the right one if multiple exist)
+local function GetClosestShipToPlayer()
+    local player = GetPlayerSafe()
+    local pLoc = GetActorLoc(player)
+    if not pLoc then 
+        Log("Could not find player location.")
+        return nil 
+    end
+
+    local bestShip = nil
+    local bestDist = 999999999
+
     local ok, pawns = pcall(function() return FindAllOf("Pawn") end)
     if not ok or not pawns then return nil end
     
@@ -41,96 +141,112 @@ local function FindActiveShip(preferredClass)
             local okName, name = pcall(function() return pawn:GetFullName() end)
             if okName and name then
                 local lowerName = string.lower(name)
-                local currentClass = string.match(name, "^([^%s]+)") or name
-                
                 local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character") and not string.find(lowerName, "shallowboat")
-                local matchesPreferred = (not preferredClass) or (preferredClass == currentClass)
-                
-                if isShip and matchesPreferred then
-                    -- Make sure we can read its location to ensure it's a real world instance
-                    local okLoc, loc = pcall(function() return pawn:K2_GetActorLocation() end)
-                    if okLoc and loc then
-                        local okX = pcall(function() return loc.X + 0 end)
-                        if okX then 
-                            return pawn 
+                if isShip then
+                    local sLoc = GetActorLoc(pawn)
+                    if sLoc then
+                        local dx = pLoc.X - sLoc.X
+                        local dy = pLoc.Y - sLoc.Y
+                        local dz = pLoc.Z - sLoc.Z
+                        local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        if dist < bestDist then
+                            bestDist = dist
+                            bestShip = pawn
                         end
                     end
                 end
             end
         end
     end
+    
+    -- 15000 units is approx 150 meters. Prevents saving ships halfway across the map.
+    if bestShip and bestDist < 15000 then
+        return bestShip
+    end
+    
+    Log("No ship found close enough to the player.")
     return nil
 end
 
--- Returns the relative path into our mod folder so the json isn't dumped in Binaries/Win64
-local function GetConfigFilePath()
-    return "ue4ss/Mods/DockMeBaby/DockMeBaby_Coords.json"
+-- ==========================================
+-- DATA MANAGEMENT
+-- ==========================================
+local function GetSaveFilePath()
+    return "ue4ss/Mods/DockMeBaby/DockMeBaby_SaveData.lua"
 end
 
--- Loads and parses the coordinates from the JSON file
 local function LoadDockData()
-    local fileName = GetConfigFilePath()
+    local fileName = GetSaveFilePath()
     local file = io.open(fileName, "r")
-    if not file then return nil end
+    if not file then return {} end
     
     local content = file:read("*a")
     file:close()
     
-    -- Simple regex-style matching to pull out our numbers
-    local x = tonumber(string.match(content, '"X":%s*([%-%d%.]+)'))
-    local y = tonumber(string.match(content, '"Y":%s*([%-%d%.]+)'))
-    local z = tonumber(string.match(content, '"Z":%s*([%-%d%.]+)'))
-    local yaw = tonumber(string.match(content, '"Yaw":%s*([%-%d%.]+)'))
-    local shipName = string.match(content, '"ShipName":%s*"([^"]+)"')
-    
-    if x and y and z and yaw then
-        return {X = x, Y = y, Z = z}, {Pitch = 0, Yaw = yaw, Roll = 0}, shipName
+    local chunk = load(content)
+    if chunk then
+        local ok, data = pcall(chunk)
+        if ok and type(data) == "table" then
+            return data
+        end
     end
-    return nil
+    return {}
 end
 
--- Saves coordinates to a JSON file
-local function SaveDockData(loc, rot, shipName)
-    local fileName = GetConfigFilePath()
+local function SaveDockData(data)
+    local fileName = GetSaveFilePath()
     local file = io.open(fileName, "w")
     
-    if file then
-        local safeName = tostring(shipName or "UnknownShip")
-        -- Writing a simple JSON format manually
-        file:write(string.format('{\n  "ShipName": "%s",\n  "X": %f,\n  "Y": %f,\n  "Z": %f,\n  "Yaw": %f\n}', safeName, loc.X, loc.Y, loc.Z, rot.Yaw))
-        file:close()
-        Log("Success! Saved dock position for " .. safeName .. " to " .. fileName)
-    else
+    if not file then
         Log("Error: Could not open " .. fileName .. " for writing.")
+        return
     end
+    
+    -- Write proper nested Lua dictionary structure
+    file:write("return {\n")
+    for playerName, ships in pairs(data) do
+        file:write(string.format('  ["%s"] = {\n', playerName))
+        for shipClass, coords in pairs(ships) do
+            file:write(string.format('    ["%s"] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', shipClass, coords.X, coords.Y, coords.Z, coords.Yaw))
+        end
+        file:write("  },\n")
+    end
+    file:write("}\n")
+    file:close()
+    Log("Success! Saved multi-ship data to " .. fileName)
 end
 
--- Console Command: scanship
-RegisterConsoleCommandHandler("scanship", function(FullCommand, Parameters, Ar)
-    ScanForShips()
-    return true
-end)
+-- ==========================================
+-- COMMANDS
+-- ==========================================
 
 -- Console Command: setdock
 RegisterConsoleCommandHandler("setdock", function(FullCommand, Parameters, Ar)
     Log("Command 'setdock' triggered.")
     
-    local ship = FindActiveShip()
+    local ship = GetClosestShipToPlayer()
     if not ship then
-        Log("Error: No valid active ship found in the world.")
+        Log("Error: You must be near a ship to save its dock.")
         return true
     end
 
     local okName, name = pcall(function() return ship:GetFullName() end)
     local shipClass = string.match(name, "^([^%s]+)") or name
-    Log("Targeting Ship: " .. tostring(shipClass))
+    local playerName = GetPlayerIdentifier()
+    
+    Log("Targeting Ship: " .. tostring(shipClass) .. " for Player: " .. playerName)
 
-    local okLoc, loc = pcall(function() return ship:K2_GetActorLocation() end)
+    local loc = GetActorLoc(ship)
     local okRot, rot = pcall(function() return ship:K2_GetActorRotation() end)
     
-    if okLoc and loc and okRot and rot then
+    if loc and okRot and rot then
         Log(string.format("Current Ship Transform -> X:%.2f, Y:%.2f, Z:%.2f, Yaw:%.2f", loc.X, loc.Y, loc.Z, rot.Yaw))
-        SaveDockData(loc, rot, shipClass)
+        
+        local data = LoadDockData()
+        if not data[playerName] then data[playerName] = {} end
+        data[playerName][shipClass] = { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw }
+        
+        SaveDockData(data)
     else
         Log("Error: Failed to read ship location or rotation.")
     end
@@ -142,28 +258,58 @@ end)
 RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
     Log("Command 'dock' triggered.")
     
-    local targetLoc, targetRot, savedShipClass = LoadDockData()
-    if not targetLoc then
-        Log("Error: Could not load coordinates from " .. GetConfigFilePath())
+    local playerName = GetPlayerIdentifier()
+    local data = LoadDockData()
+    
+    if not data[playerName] then
+        Log("Error: No saved docks found for player: " .. playerName)
         return true
     end
     
-    local ship = FindActiveShip(savedShipClass)
-    if not ship then
-        Log("Error: No valid active ship found in the world.")
+    -- Anti-Cheat: Check proximity to Camp (BuildingCenter)
+    local maxAllowedDistance = 25000
+    local isNear, currentDist = IsPlayerNearCamp(maxAllowedDistance)
+    
+    if not isNear then
+        if currentDist == 999999999 then
+            Log("Error: Could not find any Camp (BuildingCenter) in the world. You need a camp to dock.")
+        else
+            Log(string.format("Error: You are too far from your Camp to dock! (Distance: %.0f / %.0f)", currentDist, maxAllowedDistance))
+        end
         return true
     end
-
-    local okName, name = pcall(function() return ship:GetFullName() end)
-    Log("Teleporting Ship: " .. tostring(name))
-
-    local okLoc = pcall(function() return ship:K2_SetActorLocation(targetLoc, false, {}, true) end)
-    local okRot = pcall(function() return ship:K2_SetActorRotation(targetRot, true) end)
     
-    if okLoc and okRot then
-        Log(string.format("Success! Ship docked at X:%.2f, Y:%.2f, Z:%.2f, Yaw:%.2f", targetLoc.X, targetLoc.Y, targetLoc.Z, targetRot.Yaw))
-    else
-        Log("Error: Failed to set ship location or rotation. Check parameters.")
+    local ok, pawns = pcall(function() return FindAllOf("Pawn") end)
+    if not ok or not pawns then return true end
+
+    local dockedCount = 0
+    for _, pawn in ipairs(pawns) do
+        if pawn and pawn:IsValid() then
+            local okName, name = pcall(function() return pawn:GetFullName() end)
+            if okName and name then
+                local lowerName = string.lower(name)
+                local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character") and not string.find(lowerName, "shallowboat")
+                if isShip then
+                    local shipClass = string.match(name, "^([^%s]+)") or name
+                    local savedCoords = data[playerName][shipClass]
+                    
+                    if savedCoords then
+                        local targetLoc = { X = savedCoords.X, Y = savedCoords.Y, Z = savedCoords.Z }
+                        local targetRot = { Pitch = 0, Yaw = savedCoords.Yaw, Roll = 0 }
+                        
+                        pcall(function() pawn:K2_SetActorLocation(targetLoc, false, {}, true) end)
+                        pcall(function() pawn:K2_SetActorRotation(targetRot, true) end)
+                        
+                        Log(string.format("Success! %s docked.", shipClass))
+                        dockedCount = dockedCount + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    if dockedCount == 0 then
+        Log("Error: Found saved data, but no matching active ships in the world.")
     end
 
     return true
@@ -171,4 +317,4 @@ end)
 
 -- Entry point execution
 Log("Mod initialized successfully.")
-Log("Available console commands: scanship, setdock, dock")
+Log("Available console commands: setdock, dock")
