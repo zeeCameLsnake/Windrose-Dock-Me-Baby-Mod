@@ -54,63 +54,209 @@ local function GetActorLoc(actor)
     return nil
 end
 
-local function GetPlayerIdentifier()
-    local okPC, pc = pcall(function() return FindFirstOf("PlayerController") end)
-    if okPC and pc and pc:IsValid() then
-        local okPS, ps = pcall(function() return pc.PlayerState end)
-        if okPS and ps and ps:IsValid() then
-            local okName, pName = pcall(function() return ps:GetPlayerName() end)
-            if okName and pName then
-                local rawName = ""
-                -- Unpack the UE4 FString object into a normal Lua string
-                pcall(function()
-                    if type(pName) == "userdata" and pName.ToString then
-                        rawName = pName:ToString()
-                    else
-                        rawName = tostring(pName)
+local function GetPawnFromContextOwner(owner)
+    if not owner or not owner:IsValid() then return nil end
+    local name = owner:GetFullName()
+    if string.find(name, "Character") or string.find(name, "Pawn") then
+        return owner
+    end
+    local ok, p = pcall(function() return owner:GetPawn() end)
+    if not (ok and p and p:IsValid()) then
+        ok, p = pcall(function() return owner:K2_GetPawn() end)
+    end
+    if not (ok and p and p:IsValid()) then
+        pcall(function() p = owner.Pawn end)
+    end
+    if ok and p and p:IsValid() then return p end
+    return nil
+end
+
+local function GetPlayerNameFromContextOwner(owner)
+    if not owner or not owner:IsValid() then return "UnknownPlayer" end
+    
+    local ps = nil
+    local name = owner:GetFullName()
+    
+    if string.find(name, "PlayerState") then
+        ps = owner
+    else
+        pcall(function() ps = owner.PlayerState end)
+    end
+    
+    if ps and ps:IsValid() then
+        local okName, pName = pcall(function() return ps:GetPlayerName() end)
+        if okName and pName then
+            local rawName = ""
+            pcall(function()
+                if type(pName) == "userdata" then
+                    local okStr, str = pcall(function() return pName:ToString() end)
+                    if okStr and str then rawName = str else rawName = tostring(pName) end
+                else
+                    rawName = tostring(pName)
+                end
+            end)
+            
+            if rawName ~= "" and not string.match(rawName, "^FString%s") then
+                local safeName = string.gsub(rawName, '[^%w%s_]', '')
+                if safeName ~= "" then return safeName end
+            end
+        end
+    end
+    return "UnknownPlayer"
+end
+
+local function GetWorldID(contextActor)
+    -- Attempt 1: Blueprint Getter UR5UICommonLibrary::GetWorldRandomSeed
+    local okLib, libClass = pcall(function() return StaticClass("/Script/R5.R5UICommonLibrary") end)
+    if okLib and libClass and libClass:IsValid() then
+        local okCDO, lib = pcall(function() return libClass:GetDefaultObject() end)
+        if okCDO and lib and lib:IsValid() then
+            local okSeed, seed = pcall(function() return lib:GetWorldRandomSeed(contextActor) end)
+            if okSeed and seed then
+                local numSeed = tonumber(seed)
+                if not numSeed and type(seed) == "userdata" then
+                    local okGet, unwr = pcall(function() return seed:get() end)
+                    if okGet and unwr then numSeed = tonumber(unwr) end
+                end
+                if numSeed and numSeed ~= 0 then return "WorldSeed_" .. tostring(numSeed) end
+            end
+        end
+    end
+
+    -- Attempt 2: ArchipelagoSeed from ALL R5WorldGenerator instances
+    local okWG, wgs = pcall(function() return FindAllOf("R5WorldGenerator") end)
+    if okWG and wgs then
+        for _, wg in ipairs(wgs) do
+            if wg and wg:IsValid() then
+                local okSeed, seed = pcall(function() return wg.ArchipelagoSeed end)
+                if okSeed and seed then
+                    local numSeed = tonumber(seed)
+                    if not numSeed and type(seed) == "userdata" then
+                        local okGet, unwr = pcall(function() return seed:get() end)
+                        if okGet and unwr then numSeed = tonumber(unwr) end
                     end
-                end)
-                
-                -- Ensure we don't accidentally save the FString memory pointer
-                if rawName ~= "" and not string.match(rawName, "^FString%s") then
-                    local safeName = string.gsub(rawName, '[^%w%s_]', '')
-                    if safeName ~= "" then
-                        return safeName
+                    if numSeed and numSeed ~= 0 then return "WorldSeed_" .. tostring(numSeed) end
+                end
+            end
+        end
+    end
+
+    -- Attempt 3: ULocalPlayerSaveGame -> SaveSlotName (Safe fallback for SP if Seed is truly 0)
+    local okSave, saveGames = pcall(function() return FindAllOf("LocalPlayerSaveGame") end)
+    if okSave and saveGames then
+        for _, saveGame in ipairs(saveGames) do
+            if saveGame and saveGame:IsValid() then
+                local okSlot, slot = pcall(function() return saveGame.SaveSlotName end)
+                if okSlot and slot then
+                    local strSlot = ""
+                    pcall(function()
+                        if type(slot) == "userdata" then
+                            local okStr, str = pcall(function() return slot:ToString() end)
+                            if okStr and str then 
+                                strSlot = str 
+                            else
+                                local okGet, unwr = pcall(function() return slot:get() end)
+                                if okGet and unwr then strSlot = tostring(unwr) else strSlot = tostring(slot) end
+                            end
+                        else
+                            strSlot = tostring(slot)
+                        end
+                    end)
+                    
+                    if strSlot ~= "" and not string.match(strSlot, "^FString%s") and strSlot ~= "nil" then
+                        local lowerSlot = string.lower(strSlot)
+                        if not string.find(lowerSlot, "settings") and not string.find(lowerSlot, "profile") then
+                            local safeSlot = string.gsub(strSlot, '[^%w%s_-]', '')
+                            if safeSlot ~= "" then return "SaveSlot_" .. safeSlot end
+                        end
                     end
                 end
             end
         end
     end
-    return "LocalPlayer"
+
+    -- Attempt 4: Safe fallback to base map name (e.g. GenlandiaMulty)
+    local ok, world = pcall(function() return contextActor:GetWorld() end)
+    if not ok or not world or not world:IsValid() then
+        ok, world = pcall(UEHelpers.GetWorld)
+    end
+    if ok and world and world:IsValid() then
+        local okName, name = pcall(function() return world:GetName() end)
+        if okName and name then
+            local safeName = string.gsub(name, '[^%w%s_]', '')
+            if safeName ~= "" then return safeName end
+        end
+    end
+
+    return "UnknownWorld"
+end
+
+local function GetShipID(ship)
+    if not ship or not ship:IsValid() then return nil end
+    local ok, val = pcall(function() return ship.ShipId end)
+    if ok and val then
+        -- Unwrap val if it's a RemoteUnrealParam Wrapper
+        if type(val) == "userdata" then
+            local okGet, unwrapped = pcall(function() return val:get() end)
+            if okGet and unwrapped then val = unwrapped end
+        end
+
+        local okID, innerID = pcall(function() return val.ID end)
+        if not okID or not innerID then
+            okID, innerID = pcall(function() return val.Id end)
+        end
+        
+        if okID and innerID then
+            local s = ""
+            pcall(function()
+                if type(innerID) == "userdata" then
+                    local okStr, str = pcall(function() return innerID:ToString() end)
+                    if okStr and str then s = str 
+                    else
+                        local okGet, unwr = pcall(function() return innerID:get() end)
+                        if okGet and unwr then s = tostring(unwr) else s = tostring(innerID) end
+                    end
+                else
+                    s = tostring(innerID)
+                end
+            end)
+            
+            -- Match consecutive hex characters (+ means 1 or more)
+            local hex = string.match(s, "([A-Fa-f0-9]+)")
+            if hex and string.len(hex) >= 16 then return hex end
+        end
+    end
+    return nil
 end
 
 -- Checks if the player is within a specific distance of ANY BuildingCenter (Camp)
-local function IsPlayerNearCamp(maxDistance)
-    local player = GetPlayerSafe()
-    local pLoc = GetActorLoc(player)
+local function IsCharacterNearCamp(character, maxDistance)
+    local pLoc = GetActorLoc(character)
     if not pLoc then 
-        Log("Could not verify player location for camp proximity check.")
+        Log("Could not verify character location for camp proximity check.")
         return false, 999999999 
     end
 
     local bestDist = 999999999
-    local ok, actors = pcall(function() return FindAllOf("Actor") end)
-    if ok and actors then
-        for _, actor in ipairs(actors) do
-            if actor and actor:IsValid() then
-                local okName, name = pcall(function() return actor:GetFullName() end)
-                if okName and name then
-                    local lowerName = string.lower(name)
-                    if string.find(lowerName, "buildingcenter") then
-                        local aLoc = GetActorLoc(actor)
-                        if aLoc then
-                            local dx = pLoc.X - aLoc.X
-                            local dy = pLoc.Y - aLoc.Y
-                            local dz = pLoc.Z - aLoc.Z
-                            local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                            if dist < bestDist then
-                                bestDist = dist
-                            end
+    local campClasses = {
+        "BP_BuildingBlock_BuildingCenterT01_C",
+        "BP_BuildingBlock_BuildingCenterT02_C",
+        "BP_BuildingBlock_BuildingCenterT03_C"
+    }
+    
+    for _, className in ipairs(campClasses) do
+        local ok, actors = pcall(function() return FindAllOf(className) end)
+        if ok and actors then
+            for _, actor in ipairs(actors) do
+                if actor and actor:IsValid() then
+                    local aLoc = GetActorLoc(actor)
+                    if aLoc then
+                        local dx = pLoc.X - aLoc.X
+                        local dy = pLoc.Y - aLoc.Y
+                        local dz = pLoc.Z - aLoc.Z
+                        local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        if dist < bestDist then
+                            bestDist = dist
                         end
                     end
                 end
@@ -122,11 +268,10 @@ local function IsPlayerNearCamp(maxDistance)
 end
 
 -- Finds the ship physically closest to the player (so we save the right one if multiple exist)
-local function GetClosestShipToPlayer()
-    local player = GetPlayerSafe()
-    local pLoc = GetActorLoc(player)
+local function GetClosestShipToCharacter(character)
+    local pLoc = GetActorLoc(character)
     if not pLoc then 
-        Log("Could not find player location.")
+        Log("Could not find character location.")
         return nil 
     end
 
@@ -204,12 +349,21 @@ local function SaveDockData(data)
     
     -- Write proper nested Lua dictionary structure
     file:write("return {\n")
-    for playerName, ships in pairs(data) do
-        file:write(string.format('  ["%s"] = {\n', playerName))
-        for shipClass, spots in pairs(ships) do
-            file:write(string.format('    ["%s"] = {\n', shipClass))
-            for i, coords in ipairs(spots) do
-                file:write(string.format('      [%d] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', i, coords.X, coords.Y, coords.Z, coords.Yaw))
+    for worldId, players in pairs(data) do
+        file:write(string.format('  ["%s"] = {\n', worldId))
+        for playerName, ships in pairs(players) do
+            file:write(string.format('    ["%s"] = {\n', playerName))
+            for shipClass, spots in pairs(ships) do
+                -- Support new direct GUID mapping or old array format
+                if spots.X then
+                    file:write(string.format('      ["%s"] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', shipClass, spots.X, spots.Y, spots.Z, spots.Yaw))
+                elseif type(spots) == "table" and spots[1] then
+                    file:write(string.format('      ["%s"] = {\n', shipClass))
+                    for i, coords in ipairs(spots) do
+                        file:write(string.format('        [%d] = { X = %f, Y = %f, Z = %f, Yaw = %f },\n', i, coords.X, coords.Y, coords.Z, coords.Yaw))
+                    end
+                    file:write("      },\n")
+                end
             end
             file:write("    },\n")
         end
@@ -224,21 +378,15 @@ end
 -- COMMANDS
 -- ==========================================
 
--- Console Command: setdock
-RegisterConsoleCommandHandler("setdock", function(FullCommand, Parameters, Ar)
-    Log("Command 'setdock' triggered.")
-    
-    local ship = GetClosestShipToPlayer()
-    if not ship then
-        Log("Error: You must be near a ship to save its dock.")
-        return true
-    end
+local function ExecuteSetDockLogic(playerName, ship, worldID)
+    Log("Server executing 'setdock' for " .. playerName .. " in world: " .. worldID)
 
     local okName, name = pcall(function() return ship:GetFullName() end)
     local shipClass = string.match(name, "^([^%s]+)") or name
-    local playerName = GetPlayerIdentifier()
+    local shipId = GetShipID(ship)
+    local key = shipId and (shipClass .. "_" .. shipId) or shipClass
     
-    Log("Targeting Ship: " .. tostring(shipClass) .. " for Player: " .. playerName)
+    Log("Targeting Ship: " .. tostring(key) .. " for Player: " .. playerName)
 
     local loc = GetActorLoc(ship)
     local okRot, rot = pcall(function() return ship:K2_GetActorRotation() end)
@@ -247,58 +395,30 @@ RegisterConsoleCommandHandler("setdock", function(FullCommand, Parameters, Ar)
         Log(string.format("Current Ship Transform -> X:%.2f, Y:%.2f, Z:%.2f, Yaw:%.2f", loc.X, loc.Y, loc.Z, rot.Yaw))
         
         local data = LoadDockData()
-        if not data[playerName] then data[playerName] = {} end
+        if not data[worldID] then data[worldID] = {} end
+        if not data[worldID][playerName] then data[worldID][playerName] = {} end
         
-        -- Auto-migrate old format if necessary
-        if type(data[playerName][shipClass]) ~= "table" or data[playerName][shipClass].X then
-            data[playerName][shipClass] = {} 
-        end
-        
-        local spots = data[playerName][shipClass]
-        local foundIdx = nil
-        
-        -- Check if we are adjusting an existing dock (within 1000 units / 10 meters)
-        for i, coords in ipairs(spots) do
-            local dx = loc.X - coords.X
-            local dy = loc.Y - coords.Y
-            local dz = loc.Z - coords.Z
-            if math.sqrt(dx*dx + dy*dy + dz*dz) < 1000 then
-                foundIdx = i
-                break
-            end
-        end
-        
-        if foundIdx then
-            spots[foundIdx] = { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw }
-            Log(string.format("Adjusted existing dock [%d] for %s.", foundIdx, shipClass))
-        else
-            table.insert(spots, { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw })
-            Log(string.format("Created new dock [%d] for %s.", #spots, shipClass))
-        end
+        data[worldID][playerName][key] = { X = loc.X, Y = loc.Y, Z = loc.Z, Yaw = rot.Yaw }
+        Log(string.format("Saved dock for %s.", key))
         
         SaveDockData(data)
     else
         Log("Error: Failed to read ship location or rotation.")
     end
+end
 
-    return true
-end)
-
--- Console Command: dock
-RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
-    Log("Command 'dock' triggered.")
-    
-    local playerName = GetPlayerIdentifier()
+local function ExecuteDockLogic(character, playerName, worldID)
+    Log("Server executing 'dock' for " .. playerName .. " in world: " .. worldID)
     local data = LoadDockData()
     
-    if not data[playerName] then
-        Log("Error: No saved docks found for player: " .. playerName)
-        return true
+    if not data[worldID] or not data[worldID][playerName] then
+        Log("Error: No saved docks found for player: " .. playerName .. " in world: " .. worldID)
+        return
     end
     
     -- Anti-Cheat: Check proximity to Camp (BuildingCenter)
     local maxAllowedDistance = 25000
-    local isNear, currentDist = IsPlayerNearCamp(maxAllowedDistance)
+    local isNear, currentDist = IsCharacterNearCamp(character, maxAllowedDistance)
     
     if not isNear then
         if currentDist == 999999999 then
@@ -306,14 +426,14 @@ RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
         else
             Log(string.format("Error: You are too far from your Camp to dock! (Distance: %.0f / %.0f)", currentDist, maxAllowedDistance))
         end
-        return true
+        return
     end
     
     local ok, pawns = pcall(function() return FindAllOf("Pawn") end)
-    if not ok or not pawns then return true end
+    if not ok or not pawns then return end
 
     local dockedCount = 0
-    local spotIndexTracker = {}
+    local teleportedCharacters = {}
     for _, pawn in ipairs(pawns) do
         if pawn and pawn:IsValid() then
             local okName, name = pcall(function() return pawn:GetFullName() end)
@@ -322,23 +442,66 @@ RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
                 local isShip = string.find(lowerName, "ship") and not string.find(lowerName, "character")
                 if isShip then
                     local shipClass = string.match(name, "^([^%s]+)") or name
-                    local spots = data[playerName][shipClass]
+                    local shipId = GetShipID(pawn)
+                    local key = shipId and (shipClass .. "_" .. shipId) or shipClass
                     
-                    if spots and type(spots) == "table" and not spots.X then
-                        local currentIdx = spotIndexTracker[shipClass] or 1
-                        local savedCoords = spots[currentIdx]
+                    local savedCoords = data[worldID][playerName][key]
+                    
+                    -- Backwards compatibility with older array structures just in case
+                    if not savedCoords and data[worldID][playerName][shipClass] then
+                        local spots = data[worldID][playerName][shipClass]
+                        if type(spots) == "table" and spots[1] then savedCoords = spots[1] end
+                    end
                         
-                        if savedCoords then
-                            local targetLoc = { X = savedCoords.X, Y = savedCoords.Y, Z = savedCoords.Z }
-                            local targetRot = { Pitch = 0, Yaw = savedCoords.Yaw, Roll = 0 }
+                    if savedCoords and savedCoords.X then
+                        local targetLoc = { X = savedCoords.X, Y = savedCoords.Y, Z = savedCoords.Z }
+                        local targetRot = { Pitch = 0, Yaw = savedCoords.Yaw, Roll = 0 }
                             
-                            pcall(function() pawn:K2_SetActorLocation(targetLoc, false, {}, true) end)
-                            pcall(function() pawn:K2_SetActorRotation(targetRot, true) end)
+                        local sLoc = GetActorLoc(pawn)
+                        local okRot, sRot = pcall(function() return pawn:K2_GetActorRotation() end)
                             
-                            Log(string.format("Success! %s docked at spot [%d].", shipClass, currentIdx))
-                            dockedCount = dockedCount + 1
-                            spotIndexTracker[shipClass] = currentIdx + 1
+                        pcall(function() pawn:K2_SetActorLocationAndRotation(targetLoc, targetRot, false, {}, true) end)
+                            
+                        -- Dedicated Server Passenger Fix: Explicitly move players riding the ship
+                        if sLoc and okRot and sRot then
+                            local okChars, allChars = pcall(function() return FindAllOf("BP_R5Character_C") end)
+                            if okChars and allChars then
+                                for _, c in ipairs(allChars) do
+                                    if c and c:IsValid() and not teleportedCharacters[c] then
+                                        local cLoc = GetActorLoc(c)
+                                        if cLoc then
+                                            local dx = cLoc.X - sLoc.X
+                                            local dy = cLoc.Y - sLoc.Y
+                                            local dz = cLoc.Z - sLoc.Z
+                                            local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                                            
+                                            -- 5000 units (50 meters) covers even large galleons
+                                            if dist < 5000 then
+                                                local currentYawRad = math.rad(sRot.Yaw)
+                                                local targetYawRad = math.rad(targetRot.Yaw)
+                                                local deltaYawRad = targetYawRad - currentYawRad
+                                                
+                                                local cosD = math.cos(deltaYawRad)
+                                                local sinD = math.sin(deltaYawRad)
+                                                
+                                                local charTargetLoc = {
+                                                    X = targetLoc.X + (dx * cosD - dy * sinD),
+                                                    Y = targetLoc.Y + (dx * sinD + dy * cosD),
+                                                    Z = targetLoc.Z + dz + 150
+                                                }
+                                                
+                                                pcall(function() c:K2_SetActorLocationAndRotation(charTargetLoc, targetRot, false, {}, true) end)
+                                                teleportedCharacters[c] = true
+                                                Log("Teleported a passenger with the ship (Dist: " .. tostring(math.floor(dist)) .. ").")
+                                            end
+                                        end
+                                    end
+                                end
+                            end
                         end
+                            
+                        Log(string.format("Success! %s docked.", key))
+                        dockedCount = dockedCount + 1
                     end
                 end
             end
@@ -348,8 +511,149 @@ RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
     if dockedCount == 0 then
         Log("Error: Found saved data, but no matching active ships in the world.")
     end
+end
 
+-- ==========================================
+-- CLIENT RPC DISPATCHER
+-- ==========================================
+local function DispatchCommandSequence(pingCount)
+    local pc = nil
+    pcall(function() pc = UEHelpers.GetPlayerController() end)
+    if not pc or not pc:IsValid() then
+        pcall(function() pc = FindFirstOf("PlayerController") end)
+    end
+
+    if not pc or not pc:IsValid() then
+        Log("Error: No PlayerController found to dispatch commands.")
+        return false
+    end
+
+    Log(string.format("Dispatching sequence of %d pings...", pingCount))
+    
+    local function sendPings(remaining)
+        if remaining > 0 and pc and pc:IsValid() then
+            pcall(function() pc:ServerCheckClientPossession() end)
+            ExecuteWithDelay(250, function() sendPings(remaining - 1) end)
+        end
+    end
+    sendPings(pingCount)
+    
     return true
+end
+
+-- ==========================================
+-- CONSOLE COMMANDS (Client Side)
+-- ==========================================
+RegisterConsoleCommandHandler("setdock", function(FullCommand, Parameters, Ar)
+    local player = GetPlayerSafe()
+    
+    local pc = nil
+    pcall(function() pc = UEHelpers.GetPlayerController() end)
+    if not pc or not pc:IsValid() then pcall(function() pc = FindFirstOf("PlayerController") end) end
+    
+    local hasAuth = false
+    if pc and pc:IsValid() then pcall(function() hasAuth = pc:HasAuthority() end) end
+
+    local ship = GetClosestShipToCharacter(player)
+    if not ship then
+        Log("Error: You must be near a ship to save its dock.")
+        return true
+    end
+    
+    if hasAuth then
+        Log("Local Authority detected (SP/Host). Executing 'setdock' directly...")
+        local playerName = GetPlayerNameFromContextOwner(pc)
+        local worldID = GetWorldID(pc)
+        ExecuteSetDockLogic(playerName, ship, worldID)
+    else
+        Log("Client detected. Sending 'setdock' sequence (5 pings) to server...")
+        local success = DispatchCommandSequence(5)
+        if not success then Log("Error: Failed to dispatch 'setdock' command.") end
+    end
+    return true
+end)
+
+RegisterConsoleCommandHandler("dock", function(FullCommand, Parameters, Ar)
+    local pc = nil
+    pcall(function() pc = UEHelpers.GetPlayerController() end)
+    if not pc or not pc:IsValid() then pcall(function() pc = FindFirstOf("PlayerController") end) end
+    
+    local hasAuth = false
+    if pc and pc:IsValid() then pcall(function() hasAuth = pc:HasAuthority() end) end
+
+    if hasAuth then
+        Log("Local Authority detected (SP/Host). Executing 'dock' directly...")
+        local player = GetPlayerSafe()
+        local playerName = GetPlayerNameFromContextOwner(pc)
+        local worldID = GetWorldID(pc)
+        if player and player:IsValid() then
+            ExecuteDockLogic(player, playerName, worldID)
+        end
+    else
+        Log("Client detected. Sending 'dock' sequence (3 pings) to server...")
+        local success = DispatchCommandSequence(3)
+        if not success then Log("Error: Failed to dispatch 'dock' command.") end
+    end
+    return true
+end)
+
+-- ==========================================
+-- SERVER SIDE RPC HOOK
+-- ==========================================
+local rpcTracker = {}
+RegisterHook("/Script/Engine.PlayerController:ServerCheckClientPossession", function(Context)
+    local contextObj = Context
+    if type(Context) == "userdata" then
+        local okCtx, ctxGet = pcall(function() return Context:get() end)
+        if okCtx and ctxGet then contextObj = ctxGet end
+    end
+    
+    -- The PlayerController itself is the root network object; it has no higher "owner"
+    local owner = contextObj
+    if not owner or not owner:IsValid() then return end
+
+    local playerName = GetPlayerNameFromContextOwner(owner)
+    
+    if not rpcTracker[playerName] then 
+        rpcTracker[playerName] = { count = 0, lastTime = 0 } 
+    end
+    local t = rpcTracker[playerName]
+    
+    local currentTime = os.clock()
+    if (currentTime - t.lastTime) > 2.0 then
+        t.count = 0
+    end
+    t.lastTime = currentTime
+    t.count = t.count + 1
+    
+    local snapCount = t.count
+    
+    local pawn = GetPawnFromContextOwner(owner) or owner
+    local worldID = GetWorldID(owner)
+    
+    ExecuteWithDelay(800, function()
+        if rpcTracker[playerName] and rpcTracker[playerName].count == snapCount then
+            if snapCount == 3 then
+                Log("Server intercepted Dock sequence (3 pings) for " .. playerName .. "!")
+                if pawn and pawn:IsValid() then
+                    ExecuteDockLogic(pawn, playerName, worldID)
+                end
+            elseif snapCount == 5 then
+                Log("Server intercepted SetDock sequence (5 pings) for " .. playerName .. "!")
+                if pawn and pawn:IsValid() then
+                    local ship = GetClosestShipToCharacter(pawn)
+                    if ship then
+                        ExecuteSetDockLogic(playerName, ship, worldID)
+                    else
+                        Log("Server Error: Player not near a ship.")
+                    end
+                end
+            end
+            if snapCount >= 3 then
+                rpcTracker[playerName].count = 0
+            end
+        end
+    end)
 end)
 
 -- Entry point execution
